@@ -9,6 +9,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      probe:
+        description: "Probe-Push senden (prüft nur den ntfy-Weg)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +27,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Probe-Push
+        if: inputs.probe
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          jq -n --arg topic "$NTFY_TOPIC" '{
+              topic: $topic,
+              title: "FlowScribe-Downloads: Probe",
+              message: "Die Download-Benachrichtigung ist eingerichtet.",
+              tags: ["white_check_mark"]
+            }' | curl -fsS -o /dev/null -H "Content-Type: application/json" --data-binary @- https://ntfy.sh
+
       - name: Letzten Stand laden
         uses: actions/cache/restore@v4
         with:
