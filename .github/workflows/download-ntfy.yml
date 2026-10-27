@@ -1,0 +1,86 @@
+# Push-Nachricht über ntfy, sobald jemand ein Setup oder die Portable-ZIP lädt.
+# GitHub meldet Downloads nicht von selbst, deshalb vergleicht der Lauf alle
+# 10 Minuten die download_count-Zähler mit dem letzten Stand (im Actions-Cache).
+# Zählt auch Downloads durch den Updater, denn latest.json verweist auf das Setup.
+# Secret NTFY_TOPIC: das ntfy-Thema, das Manu in der ntfy-App abonniert hat.
+name: Download-Benachrichtigung
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: download-ntfy
+  cancel-in-progress: false
+
+jobs:
+  pruefen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Letzten Stand laden
+        uses: actions/cache/restore@v4
+        with:
+          path: stand
+          key: download-zaehler-${{ github.run_id }}
+          restore-keys: download-zaehler-
+
+      - name: Zähler vergleichen und melden
+        id: vergleich
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p stand
+          gh api "repos/$REPO/releases?per_page=30" --jq '
+            [.[] | select(.draft | not) | .tag_name as $t | .assets[]
+              | select(.name | test("\\.(exe|zip)$"))
+              | {key: ($t + "/" + .name), value: .download_count}]
+            | from_entries' > jetzt.json
+
+          if [ ! -f stand/zaehler.json ]; then
+            echo "Erster Lauf: Stand gemerkt, keine Meldung."
+            cp jetzt.json stand/zaehler.json
+            echo "geaendert=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          neu=$(jq -r --slurpfile alt stand/zaehler.json '
+            to_entries[] | (($alt[0][.key]) // 0) as $a | select(.value > $a)
+            | "\(.key | split("/")[1]): +\(.value - $a) (gesamt \(.value))"' jetzt.json)
+
+          if [ -z "$neu" ]; then
+            echo "Keine neuen Downloads."
+            exit 0
+          fi
+          echo "$neu"
+
+          if [ -z "$NTFY_TOPIC" ]; then
+            echo "::error::Secret NTFY_TOPIC fehlt, Stand bleibt bis zur Meldung offen."
+            exit 1
+          fi
+
+          jq -n --arg topic "$NTFY_TOPIC" --arg msg "$neu" \
+            --arg url "https://github.com/$REPO/releases" '{
+              topic: $topic,
+              title: "FlowScribe heruntergeladen",
+              message: $msg,
+              tags: ["inbox_tray"],
+              click: $url
+            }' | curl -fsS -o /dev/null -H "Content-Type: application/json" --data-binary @- https://ntfy.sh
+
+          cp jetzt.json stand/zaehler.json
+          echo "geaendert=1" >> "$GITHUB_OUTPUT"
+
+      - name: Stand speichern
+        if: steps.vergleich.outputs.geaendert == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: stand
+          key: download-zaehler-${{ github.run_id }}
